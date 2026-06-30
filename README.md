@@ -26,8 +26,8 @@ aws sts get-caller-identity   # debe mostrar tu Account ID
 export AWS_DEFAULT_REGION=eu-west-1
 export STACK_NAME=app-demo-stack
 export PIPELINE_STACK_NAME=app-demo-pipeline
-export GITHUB_OWNER=tu-usuario-github
-export GITHUB_REPO=aws-cdi-cd-pipeline
+export GITHUB_OWNER=alvarolinarescabre
+export GITHUB_REPO=aws-ci-cd-pipeline
 export GITHUB_BRANCH=main
 ```
 

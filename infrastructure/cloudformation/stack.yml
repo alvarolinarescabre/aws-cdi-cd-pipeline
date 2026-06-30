@@ -191,7 +191,7 @@ Resources:
           HealthCheck:
             Command:
               - CMD-SHELL
-              - curl -fs http://localhost/health || exit 1
+              - curl -fs http://localhost/ || exit 1
             Interval: 30
             Timeout: 5
             Retries: 3
