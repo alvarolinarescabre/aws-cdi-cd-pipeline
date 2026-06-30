@@ -1,198 +1,133 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: >-
-  Infraestructura simple para desplegar la app Flask en ECS Fargate usando ECR.
+Description: Infraestructura base — VPC, ALB, ECS Fargate, ECR, CodeDeploy Blue/Green.
 
 Parameters:
   EnvironmentName:
     Type: String
     Default: app-demo
-    Description: Nombre base para la pila.
-  AppName:
-    Type: String
-    Default: api
-    Description: Nombre de la aplicación.
-  ContainerName:
-    Type: String
-    Default: api-container
-    Description: Nombre del contenedor en la definición de tarea.
-  ContainerImage:
-    Type: String
-    Default: public.ecr.aws/docker/library/nginx:latest
-    Description: Imagen inicial del contenedor. Puede cambiarse luego por la imagen de ECR.
-  ContainerPort:
-    Type: Number
-    Default: 80
-    Description: Puerto que expone la aplicación en el contenedor.
-  Cpu:
-    Type: String
-    Default: '256'
-    Description: CPU para la tarea Fargate.
-  Memory:
-    Type: String
-    Default: '512'
-    Description: Memoria para la tarea Fargate.
-  DesiredCount:
-    Type: Number
-    Default: 1
-    Description: Número de instancias del servicio.
-  RepositoryName:
-    Type: String
-    Default: api-repo
-    Description: Nombre del repositorio ECR.
+    Description: Prefijo para todos los recursos.
 
 Resources:
+
+  # ── Red ──────────────────────────────────────────────────────────────────
   VPC:
     Type: AWS::EC2::VPC
     Properties:
       CidrBlock: 10.0.0.0/16
       EnableDnsSupport: true
       EnableDnsHostnames: true
-      Tags:
-        - Key: Name
-          Value: !Sub ${EnvironmentName}-vpc
 
   InternetGateway:
     Type: AWS::EC2::InternetGateway
-    Properties:
-      Tags:
-        - Key: Name
-          Value: !Sub ${EnvironmentName}-igw
 
-  InternetGatewayAttachment:
+  IGWAttachment:
     Type: AWS::EC2::VPCGatewayAttachment
     Properties:
       VpcId: !Ref VPC
       InternetGatewayId: !Ref InternetGateway
 
-  PublicSubnetOne:
+  SubnetA:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref VPC
       CidrBlock: 10.0.1.0/24
       AvailabilityZone: !Select [0, !GetAZs '']
       MapPublicIpOnLaunch: true
-      Tags:
-        - Key: Name
-          Value: !Sub ${EnvironmentName}-public-subnet-1
 
-  PublicSubnetTwo:
+  SubnetB:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref VPC
       CidrBlock: 10.0.2.0/24
       AvailabilityZone: !Select [1, !GetAZs '']
       MapPublicIpOnLaunch: true
-      Tags:
-        - Key: Name
-          Value: !Sub ${EnvironmentName}-public-subnet-2
 
-  PublicRouteTable:
+  RouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
       VpcId: !Ref VPC
-      Tags:
-        - Key: Name
-          Value: !Sub ${EnvironmentName}-public-routes
 
-  DefaultPublicRoute:
+  InternetRoute:
     Type: AWS::EC2::Route
-    DependsOn: InternetGatewayAttachment
+    DependsOn: IGWAttachment
     Properties:
-      RouteTableId: !Ref PublicRouteTable
+      RouteTableId: !Ref RouteTable
       DestinationCidrBlock: 0.0.0.0/0
       GatewayId: !Ref InternetGateway
 
-  PublicSubnetOneRouteTableAssociation:
+  SubnetARoute:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
-      RouteTableId: !Ref PublicRouteTable
-      SubnetId: !Ref PublicSubnetOne
+      RouteTableId: !Ref RouteTable
+      SubnetId: !Ref SubnetA
 
-  PublicSubnetTwoRouteTableAssociation:
+  SubnetBRoute:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
-      RouteTableId: !Ref PublicRouteTable
-      SubnetId: !Ref PublicSubnetTwo
+      RouteTableId: !Ref RouteTable
+      SubnetId: !Ref SubnetB
 
+  # ── Security Groups ───────────────────────────────────────────────────────
   ALBSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Allow HTTP traffic to ALB
+      GroupDescription: HTTP desde internet al ALB
       VpcId: !Ref VPC
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 80
           ToPort: 80
           CidrIp: 0.0.0.0/0
-      Tags:
-        - Key: Name
-          Value: !Sub ${EnvironmentName}-alb-sg
 
   ContainerSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Allow traffic from ALB to containers
+      GroupDescription: Trafico del ALB a los contenedores
       VpcId: !Ref VPC
       SecurityGroupIngress:
         - IpProtocol: tcp
-          FromPort: !Ref ContainerPort
-          ToPort: !Ref ContainerPort
+          FromPort: 80
+          ToPort: 80
           SourceSecurityGroupId: !Ref ALBSecurityGroup
-      Tags:
-        - Key: Name
-          Value: !Sub ${EnvironmentName}-container-sg
 
+  # ── ALB ──────────────────────────────────────────────────────────────────
   ALB:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
-    DependsOn: InternetGatewayAttachment
+    DependsOn: IGWAttachment
     Properties:
-      Name: !Sub ${EnvironmentName}-alb
+      Name: !Sub "${EnvironmentName}-alb"
       Scheme: internet-facing
       Type: application
-      SecurityGroups:
-        - !Ref ALBSecurityGroup
-      Subnets:
-        - !Ref PublicSubnetOne
-        - !Ref PublicSubnetTwo
-      Tags:
-        - Key: Name
-          Value: !Sub ${EnvironmentName}-alb
+      SecurityGroups: [!Ref ALBSecurityGroup]
+      Subnets: [!Ref SubnetA, !Ref SubnetB]
 
-  ALBTargetGroupBlue:
+  TargetGroupBlue:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
-      Name: !Sub ${EnvironmentName}-tg-blue
-      Port: !Ref ContainerPort
+      Name: !Sub "${EnvironmentName}-tg-blue"
+      Port: 80
       Protocol: HTTP
       TargetType: ip
       VpcId: !Ref VPC
       HealthCheckPath: /
       HealthCheckIntervalSeconds: 30
-      HealthCheckTimeoutSeconds: 5
       HealthyThresholdCount: 2
       UnhealthyThresholdCount: 3
-      Tags:
-        - Key: Name
-          Value: !Sub ${EnvironmentName}-tg-blue
 
-  ALBTargetGroupGreen:
+  TargetGroupGreen:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
-      Name: !Sub ${EnvironmentName}-tg-green
-      Port: !Ref ContainerPort
+      Name: !Sub "${EnvironmentName}-tg-green"
+      Port: 80
       Protocol: HTTP
       TargetType: ip
       VpcId: !Ref VPC
       HealthCheckPath: /
       HealthCheckIntervalSeconds: 30
-      HealthCheckTimeoutSeconds: 5
       HealthyThresholdCount: 2
       UnhealthyThresholdCount: 3
-      Tags:
-        - Key: Name
-          Value: !Sub ${EnvironmentName}-tg-green
 
-  ALBListener:
+  Listener:
     Type: AWS::ElasticLoadBalancingV2::Listener
     Properties:
       LoadBalancerArn: !Ref ALB
@@ -200,30 +135,32 @@ Resources:
       Protocol: HTTP
       DefaultActions:
         - Type: forward
-          TargetGroupArn: !Ref ALBTargetGroupBlue
+          TargetGroupArn: !Ref TargetGroupBlue
 
+  # ── ECR ──────────────────────────────────────────────────────────────────
   ECRRepository:
     Type: AWS::ECR::Repository
     Properties:
-      RepositoryName: !Ref RepositoryName
+      RepositoryName: !Sub "${EnvironmentName}-api"
       ImageScanningConfiguration:
         ScanOnPush: true
-      ImageTagMutability: MUTABLE
 
+  # ── ECS ──────────────────────────────────────────────────────────────────
   ECSCluster:
     Type: AWS::ECS::Cluster
     Properties:
-      ClusterName: !Sub ${EnvironmentName}-cluster
+      ClusterName: !Sub "${EnvironmentName}-cluster"
 
   LogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
-      LogGroupName: !Sub /ecs/${EnvironmentName}/${AppName}
+      LogGroupName: !Sub "/ecs/${EnvironmentName}"
       RetentionInDays: 7
 
   ExecutionRole:
     Type: AWS::IAM::Role
     Properties:
+      RoleName: !Sub "${EnvironmentName}-execution-role"
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -233,63 +170,57 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
-      Tags:
-        - Key: Name
-          Value: !Sub ${EnvironmentName}-ecs-execution-role
 
   TaskDefinition:
     Type: AWS::ECS::TaskDefinition
     Properties:
-      Family: !Sub ${EnvironmentName}-${AppName}
-      RequiresCompatibilities:
-        - FARGATE
-      Cpu: !Ref Cpu
-      Memory: !Ref Memory
+      Family: !Sub "${EnvironmentName}-task"
+      RequiresCompatibilities: [FARGATE]
+      Cpu: '256'
+      Memory: '512'
       NetworkMode: awsvpc
       ExecutionRoleArn: !GetAtt ExecutionRole.Arn
       ContainerDefinitions:
-        - Name: !Ref ContainerName
-          Image: !Ref ContainerImage
+        - Name: api-container
+          Image: public.ecr.aws/docker/library/nginx:latest
           Essential: true
           PortMappings:
-            - ContainerPort: !Ref ContainerPort
-              HostPort: !Ref ContainerPort
+            - ContainerPort: 80
               Protocol: tcp
           LogConfiguration:
             LogDriver: awslogs
             Options:
               awslogs-group: !Ref LogGroup
               awslogs-region: !Ref AWS::Region
-              awslogs-stream-prefix: !Ref AppName
+              awslogs-stream-prefix: api
 
   ECSService:
     Type: AWS::ECS::Service
-    DependsOn: ALBListener
+    DependsOn: Listener
     Properties:
+      ServiceName: !Sub "${EnvironmentName}-service"
       Cluster: !Ref ECSCluster
-      DesiredCount: !Ref DesiredCount
       LaunchType: FARGATE
+      DesiredCount: 1
       TaskDefinition: !Ref TaskDefinition
-      ServiceName: !Sub ${EnvironmentName}-service
       HealthCheckGracePeriodSeconds: 60
       DeploymentController:
         Type: CODE_DEPLOY
       LoadBalancers:
-        - ContainerName: !Ref ContainerName
-          ContainerPort: !Ref ContainerPort
-          TargetGroupArn: !Ref ALBTargetGroupBlue
+        - ContainerName: api-container
+          ContainerPort: 80
+          TargetGroupArn: !Ref TargetGroupBlue
       NetworkConfiguration:
         AwsvpcConfiguration:
           AssignPublicIp: ENABLED
-          SecurityGroups:
-            - !Ref ContainerSecurityGroup
-          Subnets:
-            - !Ref PublicSubnetOne
-            - !Ref PublicSubnetTwo
+          SecurityGroups: [!Ref ContainerSecurityGroup]
+          Subnets: [!Ref SubnetA, !Ref SubnetB]
 
-  CodeDeployServiceRole:
+  # ── CodeDeploy ───────────────────────────────────────────────────────────
+  CodeDeployRole:
     Type: AWS::IAM::Role
     Properties:
+      RoleName: !Sub "${EnvironmentName}-codedeploy-role"
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -299,23 +230,20 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AWSCodeDeployRoleForECS
-      Tags:
-        - Key: Name
-          Value: !Sub ${EnvironmentName}-codedeploy-role
 
-  CodeDeployApplication:
+  CodeDeployApp:
     Type: AWS::CodeDeploy::Application
     Properties:
-      ApplicationName: !Sub ${EnvironmentName}-app
+      ApplicationName: !Sub "${EnvironmentName}-app"
       ComputePlatform: ECS
 
   CodeDeployDeploymentGroup:
     Type: AWS::CodeDeploy::DeploymentGroup
     DependsOn: ECSService
     Properties:
-      ApplicationName: !Ref CodeDeployApplication
-      DeploymentGroupName: !Sub ${EnvironmentName}-deploy-group
-      ServiceRoleArn: !GetAtt CodeDeployServiceRole.Arn
+      ApplicationName: !Ref CodeDeployApp
+      DeploymentGroupName: !Sub "${EnvironmentName}-dg"
+      ServiceRoleArn: !GetAtt CodeDeployRole.Arn
       DeploymentConfigName: CodeDeployDefault.ECSAllAtOnce
       DeploymentStyle:
         DeploymentType: BLUE_GREEN
@@ -330,40 +258,23 @@ Resources:
       LoadBalancerInfo:
         TargetGroupPairInfoList:
           - TargetGroups:
-              - Name: !GetAtt ALBTargetGroupBlue.TargetGroupName
-              - Name: !GetAtt ALBTargetGroupGreen.TargetGroupName
+              - Name: !GetAtt TargetGroupBlue.TargetGroupName
+              - Name: !GetAtt TargetGroupGreen.TargetGroupName
             ProdTrafficRoute:
               ListenerArns:
-                - !Ref ALBListener
+                - !Ref Listener
       ECSServices:
         - ClusterName: !Ref ECSCluster
-          ServiceName: !Sub ${EnvironmentName}-service
+          ServiceName: !Sub "${EnvironmentName}-service"
 
 Outputs:
-  ClusterName:
-    Description: Nombre del cluster ECS
-    Value: !Ref ECSCluster
-  ServiceName:
-    Description: Nombre del servicio ECS
-    Value: !Ref ECSService
+  ECRRepositoryName:
+    Value: !Sub "${EnvironmentName}-api"
   TaskDefinitionFamily:
-    Description: Familia de la definición de tarea ECS
-    Value: !Sub ${EnvironmentName}-${AppName}
-  RepositoryUri:
-    Description: URI del repositorio ECR creado
-    Value: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${RepositoryName}
-  RepositoryName:
-    Description: Nombre del repositorio ECR
-    Value: !Ref ECRRepository
-  ALBDnsName:
-    Description: URL pública del Application Load Balancer
-    Value: !Sub http://${ALB.DNSName}
+    Value: !Sub "${EnvironmentName}-task"
   CodeDeployAppName:
-    Description: Nombre de la aplicación CodeDeploy
-    Value: !Ref CodeDeployApplication
+    Value: !Ref CodeDeployApp
   CodeDeployDeploymentGroupName:
-    Description: Nombre del deployment group CodeDeploy
-    Value: !Sub ${EnvironmentName}-deploy-group
-  ExecutionRoleArn:
-    Description: ARN del rol de ejecución ECS
-    Value: !GetAtt ExecutionRole.Arn
+    Value: !Sub "${EnvironmentName}-dg"
+  AppURL:
+    Value: !Sub "http://${ALB.DNSName}"
